@@ -1521,6 +1521,7 @@ const SUBTITLES_RESOURCE = 'subtitles' as const;
 const CATALOG_RESOURCE = 'catalog' as const;
 const META_RESOURCE = 'meta' as const;
 const ADDON_CATALOG_RESOURCE = 'addon_catalog' as const;
+const PLAYBACK_RESOURCE = 'playback' as const;
 
 export const MOVIE_TYPE = 'movie' as const;
 export const SERIES_TYPE = 'series' as const;
@@ -1550,6 +1551,7 @@ const RESOURCES = [
   CATALOG_RESOURCE,
   META_RESOURCE,
   ADDON_CATALOG_RESOURCE,
+  PLAYBACK_RESOURCE,
 ] as const;
 
 export const RESOURCE_LABELS: Record<Resource, string> = {
@@ -1558,6 +1560,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   [CATALOG_RESOURCE]: 'Catalog',
   [META_RESOURCE]: 'Metadata',
   [ADDON_CATALOG_RESOURCE]: 'Addon Catalog',
+  [PLAYBACK_RESOURCE]: 'Playback Reporting',
 };
 
 // export const PRESET_CATEGORY_STREAMS = 'streams' as const;
@@ -1764,6 +1767,7 @@ export {
   CATALOG_RESOURCE,
   META_RESOURCE,
   ADDON_CATALOG_RESOURCE,
+  PLAYBACK_RESOURCE,
   REALDEBRID_SERVICE,
   PREMIUMIZE_SERVICE,
   ALLDEBRID_SERVICE,

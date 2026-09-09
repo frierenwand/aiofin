@@ -1,0 +1,149 @@
+import type { Server as HttpServer, IncomingMessage } from 'http';
+import type { Duplex } from 'stream';
+import { randomUUID } from 'crypto';
+import { WebSocketServer, type WebSocket } from 'ws';
+import {
+  config as appConfig,
+  createLogger,
+  getWatchStateProvider,
+  itemIdForWatchRow,
+  readToken,
+  userDataFromRow,
+  uuidToUserId,
+  type WatchStateRow,
+} from '@aiostreams/core';
+import { verifyCredentials } from './context.js';
+
+const logger = createLogger('jellyfin');
+
+const MAX_SOCKETS_PER_USER = 16;
+const MAX_SOCKETS_TOTAL = 50_000;
+const KEEPALIVE_SECONDS = 60;
+
+const SOCKET_PATH =
+  /^\/jellyfin(?:\/([^/?]+)\/([^/?]+))?(?:\/v\/[^/?]+)?(?:\/(?:emby|mediabrowser))?\/(?:socket|websocket)(?:\?|$)/i;
+
+function reject(socket: Duplex, status: number, text: string) {
+  socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
+async function authenticateUpgrade(url: string): Promise<string | null> {
+  const m = SOCKET_PATH.exec(url);
+  if (!m) return null;
+  const query = new URLSearchParams(url.split('?')[1] ?? '');
+  const apiKey =
+    query.get('api_key') ??
+    query.get('ApiKey') ??
+    query.get('apikey') ??
+    query.get('token') ??
+    '';
+  if (apiKey) {
+    const payload = readToken(apiKey);
+    if (payload) return verifyCredentials(payload.u, payload.p);
+  }
+  if (m[1] && m[2]) {
+    return verifyCredentials(decodeURIComponent(m[1]), m[2]);
+  }
+  return null;
+}
+
+function frame(MessageType: string, Data: unknown = null): string {
+  return JSON.stringify({
+    MessageType,
+    MessageId: randomUUID().replace(/-/g, ''),
+    Data,
+  });
+}
+
+/**
+ * Keepalive plus `UserDataChanged` pushes for the connected config. Clients
+ * treat the socket as optional, so nothing here is load-bearing.
+ */
+export function attachJellyfinWebSocket(server: HttpServer): void {
+  const wss = new WebSocketServer({ noServer: true });
+  const byUser = new Map<string, Set<WebSocket>>();
+
+  const send = (ws: WebSocket, type: string, data?: unknown) => {
+    if (ws.readyState === ws.OPEN) ws.send(frame(type, data));
+  };
+
+  getWatchStateProvider().onChange((uuid: string, rows: WatchStateRow[]) => {
+    const sockets = byUser.get(uuid);
+    if (!sockets?.size) return;
+    const payload = {
+      UserId: uuidToUserId(uuid),
+      UserDataList: rows.map((row) => {
+        const id = itemIdForWatchRow(row);
+        return userDataFromRow(id, row, row.snapshot?.runtimeMs);
+      }),
+    };
+    for (const ws of sockets) send(ws, 'UserDataChanged', payload);
+  });
+
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, uuid: string) => {
+    let set = byUser.get(uuid);
+    if (!set) {
+      set = new Set();
+      byUser.set(uuid, set);
+    }
+    set.add(ws);
+    send(ws, 'ForceKeepAlive', KEEPALIVE_SECONDS);
+    const timer = setInterval(
+      () => send(ws, 'ForceKeepAlive', KEEPALIVE_SECONDS),
+      (KEEPALIVE_SECONDS * 1000) / 2
+    );
+    const release = () => {
+      clearInterval(timer);
+      const s = byUser.get(uuid);
+      if (s) {
+        s.delete(ws);
+        if (!s.size) byUser.delete(uuid);
+      }
+    };
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(String(raw)) as { MessageType?: string };
+        if (msg.MessageType === 'KeepAlive') send(ws, 'KeepAlive');
+      } catch {}
+    });
+    ws.on('close', release);
+    ws.on('error', release);
+  });
+
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const url = req.url ?? '';
+    if (!SOCKET_PATH.test(url)) return;
+    if (!appConfig.jellyfin.enabled) {
+      reject(socket, 404, 'Not Found');
+      return;
+    }
+    void authenticateUpgrade(url)
+      .then((uuid) => {
+        if (socket.destroyed) return;
+        if (!uuid) {
+          reject(socket, 401, 'Unauthorized');
+          return;
+        }
+        if ((byUser.get(uuid)?.size ?? 0) >= MAX_SOCKETS_PER_USER) {
+          reject(socket, 429, 'Too Many Requests');
+          return;
+        }
+        if (wss.clients.size >= MAX_SOCKETS_TOTAL) {
+          reject(socket, 503, 'Service Unavailable');
+          return;
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit('connection', ws, req, uuid);
+        });
+      })
+      .catch((error) => {
+        logger.debug(
+          { err: error instanceof Error ? error.message : String(error) },
+          'websocket upgrade auth failed'
+        );
+        if (!socket.destroyed) reject(socket, 500, 'Internal Server Error');
+      });
+  });
+  logger.debug('jellyfin websocket attached');
+}

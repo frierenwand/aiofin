@@ -18,6 +18,7 @@ import {
   BiShareAlt,
   BiSitemap,
   BiTachometer,
+  BiTv,
   BiTransferAlt,
   BiUserCheck,
 } from 'react-icons/bi';
@@ -393,6 +394,12 @@ export const TAB_MANIFEST: Record<string, Omit<TabDef, 'section'>> = {
     icon: BiPlayCircle,
     group: 'Traffic',
     order: 330,
+  },
+  jellyfin: {
+    label: 'Jellyfin',
+    icon: BiTv,
+    group: 'Traffic',
+    order: 340,
   },
 };
 

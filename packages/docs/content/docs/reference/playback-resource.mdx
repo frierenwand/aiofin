@@ -1,0 +1,152 @@
+---
+title: Playback Resource
+description: How an addon receives real playback events from AIOStreams, so a tracker can scrobble what was actually watched.
+---
+
+Stremio Core reports playback to the Stremio API, never to addons. An addon that scrobbles
+therefore has to guess, usually from the subtitle request that arrives when a player opens: it
+learns that playback **started**, and nothing else. An episode abandoned after three minutes and
+one watched to the end look identical.
+
+AIOStreams' Jellyfin clients report position every 5 to 10 seconds, along with pause, stop and
+mark-played. The **`playback` resource** hands that to any addon that asks for it.
+
+<Callout type="info">
+  Only playback through the Jellyfin API produces these events. A stream played in Stremio
+  reports nothing, so an addon that also guesses from its own subtitle request keeps working
+  exactly as before, and the two cannot double-count.
+</Callout>
+
+## Declaring it
+
+Add `playback` to your `resources` and a root-level `playback` object. Resource names are
+free-form strings in Stremio, and unknown manifest keys are ignored, so this stays a perfectly
+normal addon everywhere else.
+
+```json
+{
+  "id": "com.example.tracker",
+  "version": "1.2.0",
+  "name": "Example Tracker",
+  "types": ["movie", "series"],
+  "resources": [
+    "meta",
+    {
+      "name": "playback",
+      "types": ["movie", "series"],
+      "idPrefixes": ["tt", "tmdb:", "kitsu:"]
+    }
+  ],
+  "playback": {
+    "version": 1,
+    "events": ["stop", "played", "unplayed"]
+  }
+}
+```
+
+| Field                            | Meaning                                                                                                                                |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `types`, `idPrefixes`            | On the resource entry. Filtering happens before anything is sent, so an anime tracker declaring `kitsu:` never hears about `tt` items. |
+| `playback.version`               | The contract version you implement. Currently `1`.                                                                                     |
+| `playback.events`                | The kinds you want. Omit it to receive everything. Unknown kinds are ignored, so listing a future one is safe.                         |
+| `playback.minProgressIntervalMs` | Read and stored, but `progress` is not sent in this version.                                                                           |
+
+The user's configuration is already in your addon URL, so that is the credential; there is no
+separate authentication and no header identifying the user.
+
+## Receiving events
+
+```http
+POST {addonBase}/playback/series/tt0903747:3:7.json
+Content-Type: application/json
+```
+
+```json
+{
+  "id": "series|tt0903747|3|7|stop|29290695",
+  "event": "stop",
+  "at": 1757441718,
+  "metaId": "tt0903747",
+  "videoId": "tt0903747:3:7",
+  "positionMs": 2680000,
+  "durationMs": 2820000,
+  "played": true,
+  "season": 3,
+  "episode": 7,
+  "ids": { "imdb": "tt0903747", "tmdb": "1396", "tvdb": "81189" }
+}
+```
+
+`{addonBase}` is your manifest URL minus `/manifest.json`, exactly as for every other resource,
+and the path id is the video id. `season` and `episode` are sent as fields as well, so you never
+have to parse an id grammar.
+
+### Two id spaces
+
+`metaId` is the meta the video belongs to; `videoId` is the exact video that was played. They are
+often in the same space (`tt0903747` and `tt0903747:3:7`) but they do not have to be — a metadata
+addon may key a show on IMDb and its episodes on kitsu.
+
+```json
+{
+  "metaId": "tt13293588",
+  "videoId": "kitsu:42323:7",
+  "season": 1,
+  "episode": 7,
+  "ids": {
+    "imdb": "tt13293588",
+    "tmdb": "94664",
+    "tvdb": "371310",
+    "mal": "39535",
+    "kitsu": "42323",
+    "anilist": "108465",
+    "anidb": "14758"
+  }
+}
+```
+
+`ids` always describes the **show or film**, not the episode, and carries every id the metadata
+addon knew about, so a tracker can key on whichever it uses. Your declared `idPrefixes` are
+matched against either id, so declaring `tt` still reaches you when the videos are kitsu-spaced.
+
+Season and episode numbering is whatever the metadata addon used. Anime keyed on kitsu or MAL is
+usually absolute-numbered in one season; the same show keyed on TVDB is split into broadcast
+seasons. `ids` plus `metaId` tell you which convention you are looking at.
+
+| Event      | When                                                                         |
+| ---------- | ---------------------------------------------------------------------------- |
+| `start`    | Playback began.                                                              |
+| `stop`     | Playback ended. `played` says whether it passed the watched threshold (90%). |
+| `played`   | The user marked it watched.                                                  |
+| `unplayed` | The user cleared that.                                                       |
+
+`progress` exists in the contract but is not sent: a scrobble needs the stop, and a tick every
+few seconds would be a request against your server for every viewer.
+
+The interesting one is `stop` with `played: true`. That is the moment to write history; a `stop`
+with `played: false` is someone who did not finish.
+
+## Responding
+
+| Status       | What AIOStreams does                                                              |
+| ------------ | --------------------------------------------------------------------------------- |
+| `200`, `204` | Delivered.                                                                        |
+| `401`, `403` | Marks your addon as needing a reconnect and pauses delivery, keeping the backlog. |
+| `429`, `5xx` | Retries with backoff, honouring `Retry-After`.                                    |
+| other `4xx`  | Drops that event.                                                                 |
+
+Events are queued before the client's request returns and delivered by a background worker, so a
+slow or unreachable addon never delays anybody's playback. Failed deliveries retry over roughly a
+day (30 seconds, 2 minutes, 10 minutes, 1 hour, 6 hours).
+
+## Idempotency
+
+`id` is derived from the item, the event kind and a one-minute bucket, not randomly, and it is
+identical across retries. Some clients also report one stop twice, in two different shapes, so
+**deduplicate on `id`** if a duplicate scrobble would be visible to your users.
+
+## Enabling it
+
+The instance operator sets `WATCH_STATE_HANDOFF_ENABLED=true`. After that, any addon in a
+configuration that declares the resource receives events, like any other resource; a user who
+does not want it unchecks **Playback Reporting** in that addon's Resources option.

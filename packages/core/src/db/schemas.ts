@@ -108,6 +108,16 @@ const Formatter = z.object({
     .optional(),
 });
 
+/** Per-configuration settings for the Jellyfin-compatible API. */
+const JellyfinSettings = z.object({
+  /** Resolve streams when an item is opened so clients can offer a version picker. Default on. */
+  resolveOnOpen: z.boolean().optional(),
+  /** Versions offered per item; the instance setting caps it. */
+  maxVersions: z.number().int().min(1).max(50).optional(),
+});
+
+export type JellyfinSettings = z.infer<typeof JellyfinSettings>;
+
 const StreamProxyConfig = z.object({
   enabled: z.boolean().optional(),
   id: z.enum(constants.PROXY_SERVICES).optional(),
@@ -1011,6 +1021,7 @@ export const UserDataSchema = z.object({
       reconfigureService: z.boolean().optional(),
     })
     .optional(),
+  jellyfin: JellyfinSettings.optional(),
 });
 
 export type UserData = z.infer<typeof UserDataSchema>;
@@ -1052,6 +1063,17 @@ const AddonCatalogDefinitionSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
 });
+
+/**
+ * The root `playback` key of an addon declaring the `playback` resource.
+ */
+export const PlaybackCapabilitySchema = z.looseObject({
+  version: z.coerce.number().optional(),
+  events: z.array(z.string()).optional(),
+  minProgressIntervalMs: z.coerce.number().min(0).optional(),
+});
+
+export type PlaybackCapability = z.infer<typeof PlaybackCapabilitySchema>;
 
 export const ManifestSchema = z
   .object({
@@ -1174,6 +1196,18 @@ export type Stream = z.infer<typeof StreamSchema>;
 /** Best-to-worst provenance tiers for ParsedFile.mediaInfoQuality. */
 export const MEDIA_INFO_QUALITY_TIERS = ['probe', 'indexer', 'addon'] as const;
 
+/** One probed audio or subtitle track; see ParsedMediaTrack in utils/media-info. */
+export const MediaTrackSchema = z.object({
+  lang: z.string().optional(),
+  codec: z.string().optional(),
+  title: z.string().optional(),
+  tag: z.string().optional(),
+  channels: z.string().optional(),
+  default: z.boolean().optional(),
+  forced: z.boolean().optional(),
+});
+export type MediaTrack = z.infer<typeof MediaTrackSchema>;
+
 export const ParsedFileSchema = z.object({
   releaseGroup: z.string().optional(),
   resolution: z.string().optional(),
@@ -1185,6 +1219,8 @@ export const ParsedFileSchema = z.object({
   mediaInfoQuality: z.enum(MEDIA_INFO_QUALITY_TIERS).optional(),
   languages: z.array(z.string()),
   subtitles: z.array(z.string()).optional(),
+  audioTracks: z.array(MediaTrackSchema).optional(),
+  subtitleTracks: z.array(MediaTrackSchema).optional(),
   subbed: z.boolean().optional(),
   dubbed: z.boolean().optional(),
   title: z.string().optional(),
@@ -1574,6 +1610,17 @@ const StatusResponseSchema = z.object({
     addonName: z.string(),
     customHtml: z.string().optional(),
     featuredTemplateIds: z.array(z.string()).optional(),
+    jellyfin: z
+      .object({
+        enabled: z.boolean(),
+        /** Cap on versions per item; a configuration may ask for fewer. */
+        maxVersions: z.number(),
+        /** `user` leaves the per-configuration switch free; the others force it. */
+        resolveOnOpen: z.enum(['always', 'never', 'user']),
+        /** How deep a client may page into one library. 0 = uncapped. */
+        maxCatalogItems: z.number(),
+      })
+      .optional(),
     alternateDesign: z.boolean(),
     protected: z.boolean(),
     community: z.object({

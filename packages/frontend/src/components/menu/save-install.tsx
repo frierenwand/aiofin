@@ -6,7 +6,10 @@ import {
   createUserConfig,
   deleteUserConfig,
   changePassword,
+  approveJellyfinQuickConnect,
+  getPlaybackSinks,
   CreateUserResponse,
+  type PlaybackSink,
 } from '@/lib/api';
 import { PageWrapper } from '@/components/shared/page-wrapper';
 import { Alert } from '@/components/ui/alert';
@@ -34,6 +37,7 @@ import { useDisclosure } from '@/hooks/disclosure';
 import { Modal } from '../ui/modal';
 import { Select } from '../ui/select';
 import { Switch } from '../ui/switch';
+import { NumberInput } from '../ui/number-input';
 import { TemplateExportModal } from '../shared/templates/export-modal';
 import { ConfigTemplatesModal } from '../shared/templates';
 import { PasswordInput } from '../ui/password-input';
@@ -520,6 +524,8 @@ interface InstallCardProps {
   onOpenSearchApi: () => void;
   disableSeanimeCard?: boolean;
   seanimeDisabledReason?: string;
+  disableJellyfinCard?: boolean;
+  jellyfinDisabledReason?: string;
   disableNabIndexerCard?: boolean;
   nabIndexerDisabledReason?: string;
   disableSearchApiCard?: boolean;
@@ -541,6 +547,8 @@ function InstallCard({
   onOpenSearchApi,
   disableSeanimeCard,
   seanimeDisabledReason,
+  disableJellyfinCard,
+  jellyfinDisabledReason,
   disableNabIndexerCard,
   nabIndexerDisabledReason,
   disableSearchApiCard,
@@ -652,10 +660,11 @@ function InstallCard({
             <AppCard
               logoSrc="https://raw.githubusercontent.com/jellyfin/jellyfin-ux/refs/heads/master/logos/PNG-4x/jellyfin-icon--color-on-dark.png"
               name="Jellyfin"
-              description="Via Gelato plugin"
-              unofficial
-              author="lostb1t"
+              description="Sign in from any Jellyfin app"
+              beta
               onClick={onOpenJellyfin}
+              disabled={disableJellyfinCard}
+              disabledReason={jellyfinDisabledReason}
             />
             <AppCard
               logoSrc="https://link.chillio.app/app-icon.png"
@@ -1468,6 +1477,14 @@ function Content() {
   const hasStatus = !!status;
   const searchApiDisabled = status?.settings?.searchApiDisabled ?? false;
   const nabApiDisabled = status?.settings?.nabApiDisabled ?? false;
+  const jellyfin = status?.settings?.jellyfin;
+  const jellyfinEnabled = jellyfin?.enabled ?? false;
+  const jellyfinVersionCap = jellyfin?.maxVersions ?? 10;
+  // `user` leaves the switch to the configuration; the others force it.
+  const jellyfinResolveForced =
+    jellyfin?.resolveOnOpen && jellyfin.resolveOnOpen !== 'user'
+      ? jellyfin.resolveOnOpen === 'always'
+      : null;
   const seanimeExtensionVersion =
     status?.settings?.seanimeExtensionVersion ?? null;
   const isSeanimeVersionUnavailable =
@@ -1518,6 +1535,10 @@ function Content() {
   const seanimeModal = useDisclosure(false);
   const stremioCustomSourceModal = useDisclosure(false);
   const jellyfinModal = useDisclosure(false);
+  const [quickConnectCode, setQuickConnectCode] = React.useState('');
+  const [approvingQuickConnect, setApprovingQuickConnect] =
+    React.useState(false);
+  const [playbackSinks, setPlaybackSinks] = React.useState<PlaybackSink[]>([]);
   const aniyomiModal = useDisclosure(false);
   const nabIndexerModal = useDisclosure(false);
   const searchApiModal = useDisclosure(false);
@@ -1723,6 +1744,61 @@ function Content() {
     });
   };
 
+  // The client stores this address and builds its own URLs from it, so the
+  // variant has to be in the path.
+  const jellyfinServerUrl = `${baseUrl}/jellyfin${variantPath}`;
+  const jellyfinUsername = profileAlias ?? uuid ?? '';
+  const copyJellyfinServerUrl = async () => {
+    await copyToClipboard(jellyfinServerUrl, {
+      onSuccess: () => toast.success('Server address copied to clipboard'),
+      onError: () => toast.error('Failed to copy address'),
+    });
+  };
+  const copyJellyfinUsername = async () => {
+    await copyToClipboard(jellyfinUsername, {
+      onSuccess: () => toast.success('Username copied to clipboard'),
+      onError: () => toast.error('Failed to copy username'),
+    });
+  };
+  // Read-only: an addon receives events by declaring the resource.
+  React.useEffect(() => {
+    if (!jellyfinModal.isOpen || !uuid) return;
+    let cancelled = false;
+    getPlaybackSinks({ uuid, password: password || encryptedPassword || null })
+      .then((result) => {
+        if (!cancelled) setPlaybackSinks(result.sinks ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setPlaybackSinks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jellyfinModal.isOpen, uuid, password, encryptedPassword]);
+
+  const approveQuickConnect = async () => {
+    if (!uuid || quickConnectCode.length !== 6) return;
+    setApprovingQuickConnect(true);
+    try {
+      const result = await approveJellyfinQuickConnect(
+        { uuid, password: password || encryptedPassword || null },
+        quickConnectCode
+      );
+      toast.success(
+        result.device?.app
+          ? `Signed in ${result.device.app} on ${result.device.name}`
+          : 'Quick Connect approved'
+      );
+      setQuickConnectCode('');
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to approve the code'
+      );
+    } finally {
+      setApprovingQuickConnect(false);
+    }
+  };
+
   const newznabUrl = `${baseUrl}/api/v1/newznab/api`;
   const torznabUrl = `${baseUrl}/api/v1/torznab/api`;
   const nabApiKey =
@@ -1904,6 +1980,10 @@ function Content() {
               onOpenSearchApi={searchApiModal.open}
               disableSeanimeCard={disableSeanimeCard}
               seanimeDisabledReason={seanimeDisabledReason}
+              disableJellyfinCard={!jellyfinEnabled}
+              jellyfinDisabledReason={
+                jellyfinEnabled ? undefined : 'Disabled on this instance'
+              }
               disableNabIndexerCard={nabApiDisabled}
               nabIndexerDisabledReason={
                 nabApiDisabled
@@ -2388,23 +2468,204 @@ function Content() {
           open={jellyfinModal.isOpen}
           onOpenChange={jellyfinModal.toggle}
           title="AIOStreams for Jellyfin"
-          description="Install the Gelato plugin to bring AIOStreams to Jellyfin"
+          description="Sign in from Swiftfin, Findroid, Streamyfin, Android TV, Kodi or Infuse"
+          contentClass="max-w-3xl w-full"
         >
-          <div className="space-y-4">
-            <p className="text-sm text-gray-300">
-              Gelato is an unofficial Jellyfin plugin that brings Stremio addons
-              into Jellyfin.
-            </p>
-            <Button
-              intent="primary"
-              className="w-full"
-              leftIcon={<FiExternalLink />}
-              onClick={() =>
-                window.open('https://github.com/lostb1t/Gelato', '_blank')
-              }
-            >
-              Open Gelato on GitHub
-            </Button>
+          <div className="grid gap-6 md:grid-cols-2">
+            <div className="flex flex-col gap-5">
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Server address</p>
+                <div className="flex items-center gap-2">
+                  <TextInput
+                    type="text"
+                    readOnly
+                    value={jellyfinServerUrl}
+                    className="flex-1 font-mono text-sm"
+                    onClick={(e) => e.currentTarget.select()}
+                  />
+                  <Button
+                    onClick={copyJellyfinServerUrl}
+                    intent="primary"
+                    className="shrink-0 px-3"
+                    aria-label="Copy Jellyfin server address"
+                  >
+                    <CopyIcon className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Add this in any Jellyfin client. Playback is direct only, so
+                  nothing is transcoded.
+                  {activeVariants.length > 0 && (
+                    <>
+                      {' '}
+                      It carries your selected variant
+                      {activeVariants.length === 1 ? '' : 's'}, so this address
+                      always uses {activeVariants.length === 1 ? 'it' : 'them'}.
+                    </>
+                  )}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Username</p>
+                <div className="flex items-center gap-2">
+                  <TextInput
+                    type="text"
+                    readOnly
+                    value={jellyfinUsername}
+                    className="flex-1 font-mono text-sm"
+                    onClick={(e) => e.currentTarget.select()}
+                  />
+                  <Button
+                    onClick={copyJellyfinUsername}
+                    intent="primary"
+                    className="shrink-0 px-3"
+                    aria-label="Copy Jellyfin username"
+                  >
+                    <CopyIcon className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-gray-500">
+                  {profileAlias
+                    ? 'Sign in with this alias. Any password is accepted for an alias, as elsewhere in AIOStreams.'
+                    : 'Sign in with this UUID and your configuration password.'}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Quick Connect</p>
+                <p className="text-xs text-gray-400">
+                  Easier on a TV than typing the address. Pick Quick Connect at
+                  the client&apos;s sign-in screen and enter its six-digit code
+                  here.
+                </p>
+                <div className="flex items-center gap-2">
+                  <TextInput
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="123456"
+                    maxLength={6}
+                    value={quickConnectCode}
+                    onValueChange={(v) =>
+                      setQuickConnectCode(v.replace(/\D/g, '').slice(0, 6))
+                    }
+                    className="flex-1 font-mono text-sm"
+                  />
+                  <Button
+                    onClick={approveQuickConnect}
+                    intent="primary"
+                    className="shrink-0"
+                    disabled={
+                      quickConnectCode.length !== 6 || approvingQuickConnect
+                    }
+                    loading={approvingQuickConnect}
+                  >
+                    Approve
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-5 md:border-l md:border-gray-800 md:pl-6">
+              <Switch
+                label="Resolve streams when an item is opened"
+                help={
+                  jellyfinResolveForced === null
+                    ? "On, opening a movie or episode fetches its streams so the client's version list is filled in before you press play. Off waits until playback starts, which is lighter but shows a placeholder until then."
+                    : `This instance resolves streams ${jellyfinResolveForced ? 'when an item is opened' : 'only when playback starts'} for everyone, so this cannot be changed here.`
+                }
+                side="right"
+                disabled={jellyfinResolveForced !== null}
+                value={
+                  jellyfinResolveForced ??
+                  userData.jellyfin?.resolveOnOpen ??
+                  true
+                }
+                defaultValue={true}
+                onValueChange={(value) =>
+                  setUserData((prev) => ({
+                    ...prev,
+                    jellyfin: { ...prev.jellyfin, resolveOnOpen: value },
+                  }))
+                }
+              />
+              <NumberInput
+                label="Versions per item"
+                help={`How many streams an item offers in the client's version list. This instance allows up to ${jellyfinVersionCap}.`}
+                min={1}
+                max={jellyfinVersionCap}
+                value={Math.min(
+                  userData.jellyfin?.maxVersions ?? jellyfinVersionCap,
+                  jellyfinVersionCap
+                )}
+                onValueChange={(value) =>
+                  setUserData((prev) => ({
+                    ...prev,
+                    jellyfin: {
+                      ...prev.jellyfin,
+                      maxVersions: value === undefined ? undefined : value,
+                    },
+                  }))
+                }
+              />
+              <div className="space-y-2 text-xs text-gray-500">
+                <p>
+                  Your libraries are your catalogs, in the order you set on the
+                  Catalogs page.
+                  {!!jellyfin?.maxCatalogItems && (
+                    <>
+                      {' '}
+                      Clients can browse {jellyfin.maxCatalogItems} items into
+                      each one.
+                    </>
+                  )}
+                </p>
+                <p>
+                  Version names come from your formatter, so they read the same
+                  here as they do in Stremio.
+                </p>
+                <p>Remember to save for these to take effect.</p>
+              </div>
+              {playbackSinks.length > 0 && (
+                <div className="space-y-2 border-t border-gray-800 pt-4">
+                  <p className="text-sm font-medium text-white">
+                    Playback reporting
+                  </p>
+                  <ul className="space-y-1">
+                    {playbackSinks.map((sink) => (
+                      <li
+                        key={sink.addon}
+                        className="flex items-center justify-between gap-3 text-xs"
+                      >
+                        <span className="truncate text-gray-300">
+                          {sink.addon}
+                        </span>
+                        <span
+                          className={
+                            sink.status === 'connected'
+                              ? 'shrink-0 text-gray-500'
+                              : 'shrink-0 text-[--orange]'
+                          }
+                        >
+                          {sink.status === 'connected'
+                            ? sink.lastPushAt
+                              ? `Last sent ${new Date(sink.lastPushAt).toLocaleString()}`
+                              : 'Waiting for playback'
+                            : sink.status === 'auth_expired'
+                              ? 'Reconnect this addon'
+                              : 'Not accepting events'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-xs text-gray-500">
+                    These addons asked to be told what you play here, so a
+                    tracker can record what you actually watched rather than
+                    what you pressed play on.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </Modal>
 
